@@ -33,8 +33,10 @@ class CellularPottsModel:
             self.lattice = np.random.randint(1, self.n_cells + 1, (self.L, self.L))
         elif lattice_type == "hex":
             self.lattice = self.init_hexlattice()
+        elif lattice_type == "circle":
+            self.lattice = self.init_circlelattice()
         else:
-            raise ValueError("Either random or hex, or implement other shape init.")
+            raise ValueError("Either random, circle or hex, or implement other shape init.")
         
         self.tau = self.set_cell_type()  # is dict of cells (keys) and the cell types
         self.J = self.set_adhesion_coefficient_J()
@@ -47,22 +49,16 @@ class CellularPottsModel:
     # SET UP FOR PRACTICALITIES, COEFFICIENTS AND TYPE/CELL BASED CONSTANTS: 
     #-------------------------------------------------------
 
-    def neighbors_2d(self, point_index):
-        """
-        Returns a list of the neighbors (periodic boundaries) for element (i, j).
-        """
+    def neighbors_2d(self, point_index, radius=2):
         i, j = point_index
-        neighbors = [
-                    ((i - 1) % self.L, (j - 1) % self.L), 
-                    ((i - 1) % self.L, j),
-                    ((i - 1) % self.L, (j + 1) % self.L),
-                    (i, (j - 1) % self.L),
-                    (i, (j + 1) % self.L),
-                    ((i + 1) % self.L, (j - 1) % self.L),
-                    ((i + 1) % self.L, j),
-                    ((i + 1) % self.L, (j + 1) % self.L),
-                    ]
+        neighbors = []
+        for di in range(-radius, radius + 1):
+            for dj in range(-radius, radius + 1):
+                if di == 0 and dj == 0:
+                    continue  # skip the point itself
+                neighbors.append(((i + di) % self.L, (j + dj) % self.L))
         return neighbors
+    
     
     def init_hexlattice(self):
         """
@@ -105,15 +101,42 @@ class CellularPottsModel:
         lattice = np.argmin(d2, axis=2).astype(np.int32) + 1
         return lattice
 
+    def init_circlelattice(self):
+        """
+        Function that will init a grid with circles
+        """
+        max_tries = 10000
+        centers = []
+        tries = 0 
+        while len(centers) < self.n_cells and tries < max_tries:
+            tries += 1
+            candidate = np.array([np.random.uniform(0, self.L),
+                                np.random.uniform(0, self.L)])
+            if centers:
+                dist2 = np.sum((np.array(centers) - candidate)**2, axis=1)
+                if np.any(dist2 < (self.L/10)**2):
+                    continue  # reject overlap
+            centers.append(candidate)
+        
+        grid = np.zeros((self.L, self.L), dtype=np.uint8)
+    
+        yy, xx = np.indices((self.L, self.L))
+        radius = np.sqrt((self.L**2/self.n_cells)/np.pi)
+        for i, (cx, cy) in enumerate(centers):
+            mask = (xx - cy)**2 + (yy - cx)**2 <= radius**2
+            grid[mask] = i + 1  # +1 as 0 is background
+        return grid
 
     def set_cell_type(self):
         tau = {}  # cell type dict
+        tau[0] = 0  # background type is 0
         for i in range(1, self.n_cells + 1):
             tau[i] = np.random.choice(self.n_types)
         return tau
         
     def set_object_volumes(self):
         V = {}  # volume dict
+        V[0] = 0  # background volume is 0
         if self.object_volumes is None:
             for i in range(1, self.n_cells + 1): # for each cell identifier
                 V[i] = ((self.L * self.L) / self.n_cells)
@@ -125,15 +148,16 @@ class CellularPottsModel:
         
     def set_object_perimeters(self):
         P = {}  # perimeter dict
+        P[0] = 0  # background perimeter is 0
         for i in range(1, self.n_cells + 1): # for each cell identifier
             P[i] = 2*np.sqrt(np.pi*self.V[i])  # approximate perimeter from volume assuming circular shape
         return P
 
     def set_adhesion_coefficient_J(self):
         if self.adhessions is None:
-            J = np.ones([self.n_types, self.n_types])
+            J = np.ones([self.n_types+1, self.n_types+1])
         else:
-            J = self.adhessions.reshape(self.n_types, self.n_types) 
+            J = self.adhessions
         return J
 
     #-------------------------------------------------------
@@ -271,7 +295,7 @@ class CellularPottsModel:
         target_point_index = self.neighbors_2d(source_point_index)[np.random.randint(8)]
         target_point = grid[target_point_index[0], target_point_index[1]]
 
-        if source_point == target_point:
+        if (source_point == target_point) or (source_point == 0):
             pass  # Skip if the target and source are the same cell
         else: 
             H_old = self.calculate_H(source_point=source_point,
@@ -303,12 +327,9 @@ class CellularPottsModel:
             grid = self.run_a_sim(steps=int(self.prerunsteps))
         else:
             grid = self.lattice.copy()
-        plt.rcParams["animation.html"] = "jshtml"
-        plt.rcParams['figure.dpi'] = 150  
-        plt.ioff()
 
         fig, ax = plt.subplots()
-        img = ax.imshow(grid, cmap="gist_ncar", interpolation="nearest")
+        img = ax.imshow(grid, cmap="gist_ncar_r", interpolation="nearest")
 
         def update(frame):
             for _ in range(steps_per_frame):
@@ -332,7 +353,7 @@ class CellularPottsModel:
             grid = self.lattice.copy()
 
         fig, ax = plt.subplots()
-        img = ax.imshow(grid, cmap="gist_ncar", interpolation="nearest")
+        img = ax.imshow(grid, cmap="gist_ncar_r", interpolation="nearest")
         ax.axis('off')  # hides axes for a cleaner GIF
 
         def update(frame):
