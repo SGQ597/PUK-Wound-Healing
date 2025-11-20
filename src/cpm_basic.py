@@ -30,7 +30,7 @@ class CellularPottsModel:
         self.object_volumes = object_volumes  # None or a list of target volume for each cell
         
         if lattice_type is None:
-            self.lattice = np.random.randint(0, self.n_cells, (self.L, self.L))
+            self.lattice = np.random.randint(1, self.n_cells + 1, (self.L, self.L))
         elif lattice_type == "hex":
             self.lattice = self.init_hexlattice()
         else:
@@ -41,6 +41,7 @@ class CellularPottsModel:
         self.V = self.set_object_volumes()  # is a dict of the cells (keys) and objective volumes
         self.P = self.set_object_perimeters()  # is a dict of the cells (keys) and objective perimeters
         self.volume_unit = 1
+        self.prerunsteps = 1e5
 
     #-------------------------------------------------------
     # SET UP FOR PRACTICALITIES, COEFFICIENTS AND TYPE/CELL BASED CONSTANTS: 
@@ -107,14 +108,14 @@ class CellularPottsModel:
 
     def set_cell_type(self):
         tau = {}  # cell type dict
-        for i in range(self.n_cells):
+        for i in range(1, self.n_cells + 1):
             tau[i] = np.random.choice(self.n_types)
         return tau
         
     def set_object_volumes(self):
         V = {}  # volume dict
         if self.object_volumes is None:
-            for i in range(self.n_cells): # for each cell identifier
+            for i in range(1, self.n_cells + 1): # for each cell identifier
                 V[i] = ((self.L * self.L) / self.n_cells)
         elif self.V is not None:
             for i, vol in enumerate(self.object_volumes):
@@ -124,7 +125,7 @@ class CellularPottsModel:
         
     def set_object_perimeters(self):
         P = {}  # perimeter dict
-        for i in range(self.n_cells): # for each cell identifier
+        for i in range(1, self.n_cells + 1): # for each cell identifier
             P[i] = 2*np.sqrt(np.pi*self.V[i])  # approximate perimeter from volume assuming circular shape
         return P
 
@@ -162,7 +163,7 @@ class CellularPottsModel:
         """
         Calculate the volume term.
         """
-        if self.C_v == 0:
+        if self.C_v == 0: # so it does not calculate unnecessarily
             return 0
         else:
             target_vol = self.V.get(point_value)
@@ -184,10 +185,11 @@ class CellularPottsModel:
         """
         Calculate the perimeter term.
         """
-        if self.C_p == 0:
+        if self.C_p == 0:  # so it does not calculate unnecessarily
             return 0
         else:
-            kernel_8 = np.array([[1,1,1],
+            kernel_8 = np.array(
+                    [[1,1,1],
                      [1,0,1],
                      [1,1,1]], dtype=np.int32)
             
@@ -199,14 +201,12 @@ class CellularPottsModel:
                 mask = (grid == value).astype(np.int32)
                 # Pad with wrap (periodic)
                 mask_wrapped = np.pad(mask, pad_width=1, mode='wrap')
-                # Convolve
                 neighbor_count = convolve2d(mask_wrapped, kernel_8, mode='valid')
                 
                 # Each pixel contributes perimeter = #neighbors that are different
                 perimeter_grid = 8 - neighbor_count
                 return np.sum(perimeter_grid[mask == 1])
             
-
             grid_copy = grid.copy()
             if new: # Assume we are changing the target point to the source point
                 grid_copy[target_point_index] = source_point_value
@@ -291,22 +291,21 @@ class CellularPottsModel:
             if dH < 0 or np.random.random() < np.exp(-dH / self.T):
                 grid[target_point_index] = source_point
 
-    def save_grid(self, steps):
+
+    def run_a_sim(self, steps):
         grid = self.lattice.copy()
         for _ in tqdm(range(steps)):
             self.step(grid)
         return grid
-
-    def save_animation(self, steps_per_frame=2000, frames=100, prerun=False,
-                    pickle_v="", gif_v=""):
-        # Pre-run or start from current lattice
+    
+    def run_animation(self, steps_per_frame=2000, frames=100, prerun=False):
         if prerun:
-            grid = self.save_grid(steps=steps_per_frame * frames)
+            grid = self.run_a_sim(steps=int(self.prerunsteps))
         else:
             grid = self.lattice.copy()
-
-        # Storage for saving all grids
-        all_grids = []
+        plt.rcParams["animation.html"] = "jshtml"
+        plt.rcParams['figure.dpi'] = 150  
+        plt.ioff()
 
         fig, ax = plt.subplots()
         img = ax.imshow(grid, cmap="gist_ncar", interpolation="nearest")
@@ -314,7 +313,6 @@ class CellularPottsModel:
         def update(frame):
             for _ in range(steps_per_frame):
                 self.step(grid)
-            all_grids.append(grid.copy())
             img.set_data(grid)
             return (img,)
 
@@ -325,11 +323,27 @@ class CellularPottsModel:
             interval=16,
             blit=True
         )
-
-        # Save animation as GIF
-        self.anim.save(f"animation_{gif_v}.gif", writer=PillowWriter(fps=60))
-
-        # Save grids as pickle
-        with open(f"grids_{pickle_v}.pkl", "wb") as f:
-            pickle.dump(all_grids, f)
         plt.show()
+
+    def save_animation_gif(self, steps_per_frame=2000, frames=100, output_file="animation", prerun=False):
+        if prerun:
+            grid = self.run_a_sim(steps=int(self.prerunsteps))
+        else:
+            grid = self.lattice.copy()
+
+        fig, ax = plt.subplots()
+        img = ax.imshow(grid, cmap="gist_ncar", interpolation="nearest")
+        ax.axis('off')  # hides axes for a cleaner GIF
+
+        def update(frame):
+            for _ in range(steps_per_frame):
+                self.step(grid)
+            img.set_data(grid)
+            return (img,)
+
+        anim = FuncAnimation(fig, update, frames=frames, blit=True)
+
+        # Save as GIF
+        writer = PillowWriter(fps=10)  # adjust fps as needed
+        anim.save(f"{output_file}.gif", writer=writer)
+        plt.close(fig)
