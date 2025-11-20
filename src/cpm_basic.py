@@ -4,8 +4,9 @@ from matplotlib.animation import FuncAnimation, PillowWriter, FFMpegWriter
 from tqdm import tqdm
 from scipy.signal import convolve2d
 import pickle
+import os
 import imageio.v2 as imageio
-
+WORKING_DIR = os.getcwd()
 
 class CellularPottsModel:
     def __init__(self, 
@@ -13,18 +14,18 @@ class CellularPottsModel:
                  n_types: int=2, 
                  T: int=1, 
                  L:int=100,
-                 C_v: int=1,
                  C_p: int=0,
-                 adhessions=None, 
+                 volume_coefficient=None, # 1D array of Cv for each type (length n_types+1)
+                 adhessions=None,  # 2D array of J values (shape (n_types+1, n_types+1))
                  lattice_type: str="hex",
                  object_volumes: list[float]=None):
         
         self.L = L 
         self.n_cells = n_cells
         self.T = T
-        self.C_v = C_v
         self.C_p = C_p
         self.n_types = n_types
+        self.volume_coefficient = volume_coefficient
         self.adhessions = adhessions  # list of adhessions(should be a flatten [n_typesxn_types] matrix)
         
         self.object_volumes = object_volumes  # None or a list of target volume for each cell
@@ -35,11 +36,14 @@ class CellularPottsModel:
             self.lattice = self.init_hexlattice()
         elif lattice_type == "circle":
             self.lattice = self.init_circlelattice()
+        elif lattice_type == "prerun":
+            self.lattice = self.init_prerunlattice()
         else:
-            raise ValueError("Either random, circle or hex, or implement other shape init.")
+            raise ValueError("Either random, circle, prerun, or hex, or implement other shape init.")
         
         self.tau = self.set_cell_type()  # is dict of cells (keys) and the cell types
-        self.J = self.set_adhesion_coefficient_J()
+        self.J = self.set_adhesion_coefficient_J() # is a 2D array of J values
+        self.C_v = self.set_volume_coefficient_Cv()  # is a 1D array of Cv for each type
         self.V = self.set_object_volumes()  # is a dict of the cells (keys) and objective volumes
         self.P = self.set_object_perimeters()  # is a dict of the cells (keys) and objective perimeters
         self.volume_unit = 1
@@ -49,14 +53,21 @@ class CellularPottsModel:
     # SET UP FOR PRACTICALITIES, COEFFICIENTS AND TYPE/CELL BASED CONSTANTS: 
     #-------------------------------------------------------
 
-    def neighbors_2d(self, point_index, radius=2):
+    def neighbors_2d(self, point_index):
+        """
+        Returns a list of the neighbors (periodic boundaries) for element (i, j).
+        """
         i, j = point_index
-        neighbors = []
-        for di in range(-radius, radius + 1):
-            for dj in range(-radius, radius + 1):
-                if di == 0 and dj == 0:
-                    continue  # skip the point itself
-                neighbors.append(((i + di) % self.L, (j + dj) % self.L))
+        neighbors = [
+                    ((i - 1) % self.L, (j - 1) % self.L), 
+                    ((i - 1) % self.L, j),
+                    ((i - 1) % self.L, (j + 1) % self.L),
+                    (i, (j - 1) % self.L),
+                    (i, (j + 1) % self.L),
+                    ((i + 1) % self.L, (j - 1) % self.L),
+                    ((i + 1) % self.L, j),
+                    ((i + 1) % self.L, (j + 1) % self.L),
+                    ]
         return neighbors
     
     
@@ -114,7 +125,7 @@ class CellularPottsModel:
                                 np.random.uniform(0, self.L)])
             if centers:
                 dist2 = np.sum((np.array(centers) - candidate)**2, axis=1)
-                if np.any(dist2 < (self.L/10)**2):
+                if np.any(dist2 < (self.L/5)**2):
                     continue  # reject overlap
             centers.append(candidate)
         
@@ -126,6 +137,19 @@ class CellularPottsModel:
             mask = (xx - cy)**2 + (yy - cx)**2 <= radius**2
             grid[mask] = i + 1  # +1 as 0 is background
         return grid
+
+    def init_prerunlattice(self):
+        """
+        Function that will init a grid with random values for prerun
+        """
+        lattice = np.load(f"{WORKING_DIR}/saves/initial_grid.npy")
+        self.L = lattice.shape[0]
+        list_of_cells = np.unique(lattice)
+        if 0 in list_of_cells:
+            self.n_cells = len(list_of_cells) - 1
+        else:
+            self.n_cells = len(list_of_cells)
+        return lattice
 
     def set_cell_type(self):
         tau = {}  # cell type dict
@@ -150,7 +174,7 @@ class CellularPottsModel:
         P = {}  # perimeter dict
         P[0] = 0  # background perimeter is 0
         for i in range(1, self.n_cells + 1): # for each cell identifier
-            P[i] = 2*np.sqrt(np.pi*self.V[i])  # approximate perimeter from volume assuming circular shape
+            P[i] = 2*np.sqrt(self.V[i]/np.pi)  # approximate perimeter from volume assuming circular shape
         return P
 
     def set_adhesion_coefficient_J(self):
@@ -159,6 +183,13 @@ class CellularPottsModel:
         else:
             J = self.adhessions
         return J
+    
+    def set_volume_coefficient_Cv(self):
+        if self.volume_coefficient is None:
+            C_v = np.ones(self.n_types + 1) * 5 # default value 
+        else:
+            C_v = self.volume_coefficient  # array of C_v for each type
+        return C_v
 
     #-------------------------------------------------------
     # HAMILTONIAN CALCULATION LOGIC
@@ -187,17 +218,17 @@ class CellularPottsModel:
         """
         Calculate the volume term.
         """
-        if self.C_v == 0: # so it does not calculate unnecessarily
+        if not isinstance(self.volume_coefficient, (list, np.ndarray)) and self.volume_coefficient == 0:  # so it does not calculate unnecessarily
             return 0
         else:
-            target_vol = self.V.get(point_value)
+            object_vol = self.V.get(point_value)
             if new and not source: # if we were to change the point, and the point we are looking at is the target point
                 current_vol = np.sum(grid == point_value) - self.volume_unit
             elif new and source: # if we were to change the point, and the point we are looking at is the source point
                 current_vol = np.sum(grid == point_value) + self.volume_unit
             else:
                 current_vol = np.sum(grid == point_value)
-            H_vol = (current_vol - target_vol)**2
+            H_vol = self.C_v[self.tau.get(point_value)] * (current_vol - object_vol)**2
             return H_vol
     
     def perimeter_term(self,
@@ -252,7 +283,6 @@ class CellularPottsModel:
         if new: # Assume we are changing the target point to the source point  
             H = (
                 self.adhesion_term(point_index=target_point_index, point_value=source_point, grid=grid) + 
-                self.C_v *
                     (
                     self.volume_term(point_value=target_point, grid=grid, new=new, source=False) + 
                     self.volume_term(point_value=source_point, grid=grid, new=new, source=True)
@@ -269,7 +299,6 @@ class CellularPottsModel:
         else:
             H = (
                 self.adhesion_term(point_index=target_point_index, point_value=target_point, grid=grid) + 
-                self.C_v *
                     (
                     self.volume_term(point_value=target_point, grid=grid, new=new, source=False) + 
                     self.volume_term(point_value=source_point, grid=grid, new=new, source=True)
@@ -322,11 +351,8 @@ class CellularPottsModel:
             self.step(grid)
         return grid
     
-    def run_animation(self, steps_per_frame=2000, frames=100, prerun=False):
-        if prerun:
-            grid = self.run_a_sim(steps=int(self.prerunsteps))
-        else:
-            grid = self.lattice.copy()
+    def run_animation(self, steps_per_frame=2000, frames=100):
+        grid = self.lattice.copy()
 
         fig, ax = plt.subplots()
         img = ax.imshow(grid, cmap="gist_ncar_r", interpolation="nearest")
@@ -346,11 +372,8 @@ class CellularPottsModel:
         )
         plt.show()
 
-    def save_animation_gif(self, steps_per_frame=2000, frames=100, output_file="animation", prerun=False):
-        if prerun:
-            grid = self.run_a_sim(steps=int(self.prerunsteps))
-        else:
-            grid = self.lattice.copy()
+    def save_animation_gif(self, steps_per_frame=2000, frames=100, output_file="animation"):
+        grid = self.lattice.copy()
 
         fig, ax = plt.subplots()
         img = ax.imshow(grid, cmap="gist_ncar_r", interpolation="nearest")
@@ -366,5 +389,5 @@ class CellularPottsModel:
 
         # Save as GIF
         writer = PillowWriter(fps=10)  # adjust fps as needed
-        anim.save(f"{output_file}.gif", writer=writer)
+        anim.save(f"{WORKING_DIR}/saves/{output_file}.gif", writer=writer)
         plt.close(fig)
