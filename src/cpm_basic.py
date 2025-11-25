@@ -18,7 +18,8 @@ class CellularPottsModel:
                  volume_coefficient=None, # 1D array of Cv for each type (length n_types+1)
                  adhessions=None,  # 2D array of J values (shape (n_types+1, n_types+1))
                  lattice_type: str="hex",
-                 object_volumes: list[float]=None):
+                 object_volumes: list[float]=None,
+                 periodic: bool=False):
         
         self.L = L 
         self.n_cells = n_cells
@@ -27,6 +28,7 @@ class CellularPottsModel:
         self.n_types = n_types
         self.volume_coefficient = volume_coefficient
         self.adhessions = adhessions  # list of adhessions(should be a flatten [n_typesxn_types] matrix)
+        self.periodic = periodic
         
         self.object_volumes = object_volumes  # None or a list of target volume for each cell
         
@@ -53,7 +55,7 @@ class CellularPottsModel:
     # SET UP FOR PRACTICALITIES, COEFFICIENTS AND TYPE/CELL BASED CONSTANTS: 
     #-------------------------------------------------------
 
-    def neighbors_2d(self, point_index):
+    def neighbors_2d_periodic(self, point_index):
         """
         Returns a list of the neighbors (periodic boundaries) for element (i, j).
         """
@@ -68,6 +70,27 @@ class CellularPottsModel:
                     ((i + 1) % self.L, j),
                     ((i + 1) % self.L, (j + 1) % self.L),
                     ]
+        return neighbors
+    
+    def neighbors_2d_non_periodic(self, point_index):
+        """
+        Returns a list of the neighbors (non-periodic boundaries) for element (i, j).
+        """
+        i, j = point_index
+        potential_neighbors = [
+                    (i - 1, j - 1), 
+                    (i - 1, j),
+                    (i - 1, j + 1),
+                    (i, j - 1),
+                    (i, j + 1),
+                    (i + 1, j - 1),
+                    (i + 1, j),
+                    (i + 1, j + 1),
+                    ]
+        neighbors = []
+        for ni, nj in potential_neighbors:
+            if 0 <= ni < self.L and 0 <= nj < self.L:
+                neighbors.append((ni, nj))                
         return neighbors
     
     
@@ -119,20 +142,20 @@ class CellularPottsModel:
         max_tries = 10000
         centers = []
         tries = 0 
-        while len(centers) < self.n_cells and tries < max_tries:
+        while len(centers) < self.n_cells:
             tries += 1
             candidate = np.array([np.random.uniform(0, self.L),
                                 np.random.uniform(0, self.L)])
             if centers:
                 dist2 = np.sum((np.array(centers) - candidate)**2, axis=1)
-                if np.any(dist2 < (self.L/5)**2):
+                if np.any(dist2 < (self.L/100)**2):  # minimum distance squared
                     continue  # reject overlap
             centers.append(candidate)
         
         grid = np.zeros((self.L, self.L), dtype=np.uint8)
     
         yy, xx = np.indices((self.L, self.L))
-        radius = np.sqrt((self.L**2/self.n_cells)/np.pi)
+        radius = np.sqrt((self.L**2/(self.n_cells))/np.pi)
         for i, (cx, cy) in enumerate(centers):
             mask = (xx - cy)**2 + (yy - cx)**2 <= radius**2
             grid[mask] = i + 1  # +1 as 0 is background
@@ -155,7 +178,7 @@ class CellularPottsModel:
         tau = {}  # cell type dict
         tau[0] = 0  # background type is 0
         for i in range(1, self.n_cells + 1):
-            tau[i] = np.random.choice(self.n_types)
+            tau[i] = np.random.randint(1, self.n_types+1)  # randomly assign type 1 or 2
         return tau
         
     def set_object_volumes(self):
@@ -163,7 +186,7 @@ class CellularPottsModel:
         V[0] = 0  # background volume is 0
         if self.object_volumes is None:
             for i in range(1, self.n_cells + 1): # for each cell identifier
-                V[i] = ((self.L * self.L) / self.n_cells)
+                V[i] = ((self.L * self.L) / (self.n_cells))
         elif self.V is not None:
             for i, vol in enumerate(self.object_volumes):
                 V[i] = vol
@@ -202,7 +225,10 @@ class CellularPottsModel:
         """
         Calculate the adhession term.
         """
-        neighbors = self.neighbors_2d(point_index)
+        if self.periodic:
+            neighbors = self.neighbors_2d_periodic(point_index)
+        else:
+            neighbors = self.neighbors_2d_non_periodic(point_index)
         neighbor_values = np.array([grid[r, c] for r, c in neighbors])
         different_mask = (neighbor_values != point_value)  # The neighbors that are not the same as the point
         diffs = [self.J[self.tau.get(point_value), self.tau.get(nval)] 
@@ -232,8 +258,8 @@ class CellularPottsModel:
             return H_vol
     
     def perimeter_term(self,
+                       point_value,
                        source_point_value,
-                       target_point_value,
                        target_point_index,
                        grid, 
                        new: bool):
@@ -248,15 +274,19 @@ class CellularPottsModel:
                      [1,0,1],
                      [1,1,1]], dtype=np.int32)
             
-            def compute_perimeter_periodic(grid, value):
+            def compute_perimeter(grid, value):
                 """
                 Compute perimeter of all pixels with a given value,
                 using 8-connected neighbors and periodic boundaries.
                 """
                 mask = (grid == value).astype(np.int32)
-                # Pad with wrap (periodic)
-                mask_wrapped = np.pad(mask, pad_width=1, mode='wrap')
-                neighbor_count = convolve2d(mask_wrapped, kernel_8, mode='valid')
+                if self.periodic:
+                    # Pad with wrap (periodic)
+                    mask_wrapped = np.pad(mask, pad_width=1, mode='wrap')
+                    neighbor_count = convolve2d(mask_wrapped, kernel_8, mode='valid')
+                else:
+                    mask_wrapped = np.pad(mask, pad_width=1, mode='constant', constant_values=0)
+                    neighbor_count = convolve2d(mask_wrapped, kernel_8, mode='valid')
                 
                 # Each pixel contributes perimeter = #neighbors that are different
                 perimeter_grid = 8 - neighbor_count
@@ -265,12 +295,10 @@ class CellularPottsModel:
             grid_copy = grid.copy()
             if new: # Assume we are changing the target point to the source point
                 grid_copy[target_point_index] = source_point_value
-                
-            P_source = compute_perimeter_periodic(grid_copy, source_point_value)
-            P_target = compute_perimeter_periodic(grid_copy, target_point_value)
-            
-            H_perim = (P_source - self.P.get(source_point_value))**2 + (P_target - self.P.get(target_point_value))**2
-            
+
+            P = compute_perimeter(grid_copy, point_value)
+       
+            H_perim = (P - self.P.get(point_value))**2
             return H_perim
 
     def calculate_H(self,
@@ -289,8 +317,13 @@ class CellularPottsModel:
                     ) +
                 self.C_p *
                 (
-                    self.perimeter_term(source_point_value=source_point,
-                                        target_point_value=target_point,
+                    self.perimeter_term(point_value=source_point,
+                                        source_point_value=source_point,
+                                        target_point_index=target_point_index,
+                                        grid=grid,
+                                        new=new) +
+                    self.perimeter_term(point_value=target_point,
+                                        source_point_value=target_point,
                                         target_point_index=target_point_index,
                                         grid=grid,
                                         new=new)
@@ -305,14 +338,41 @@ class CellularPottsModel:
                     ) +
                 self.C_p *
                     (
-                    self.perimeter_term(source_point_value=source_point,
-                                        target_point_value=target_point,
+                    self.perimeter_term(point_value=source_point,
+                                        source_point_value=source_point,
+                                        target_point_index=target_point_index,
+                                        grid=grid,
+                                        new=new) +
+                    self.perimeter_term(point_value=target_point,
+                                        source_point_value=target_point,
                                         target_point_index=target_point_index,
                                         grid=grid,
                                         new=new)
                     )
                 )
         return H
+
+    def total_H(self, grid):
+        """
+        Calculate the total Energy of the grid.
+        """
+        total_H = 0
+        for i in range(self.L):
+            for j in range(self.L):
+                point_value = grid[i, j]
+                total_H += self.adhesion_term(point_index=(i, j), point_value=point_value, grid=grid)
+        
+        # Volume term
+        for cell_id in range(1, self.n_cells + 1):
+            total_H += self.volume_term(point_value=cell_id, grid=grid, new=False)
+            if self.C_p != 0:
+                P = self.perimeter_term(point_value=cell_id,
+                                        source_point_value=None,
+                                        target_point_index=None,
+                                        grid=grid,
+                                        new=False)
+                total_H += self.C_p * (P - self.P.get(cell_id))**2
+        return total_H
 
     #---------------------------------------------------------
     # MONTE CARLO STEP AND ANIMATION LOGIC
@@ -321,7 +381,11 @@ class CellularPottsModel:
     def step(self, grid):
         source_point_index = [np.random.randint(self.L), np.random.randint(self.L)]
         source_point = grid[source_point_index[0], source_point_index[1]]
-        target_point_index = self.neighbors_2d(source_point_index)[np.random.randint(8)]
+        if self.periodic:
+            neighbors = self.neighbors_2d_periodic(source_point_index)
+        else:
+            neighbors = self.neighbors_2d_non_periodic(source_point_index)
+        target_point_index = neighbors[np.random.randint(len(neighbors))]
         target_point = grid[target_point_index[0], target_point_index[1]]
 
         if (source_point == target_point) or (source_point == 0):
@@ -338,7 +402,6 @@ class CellularPottsModel:
                                      target_point_index=target_point_index, 
                                      grid=grid,
                                      new=True)
-            
             dH = H_new - H_old
 
             if dH < 0 or np.random.random() < np.exp(-dH / self.T):
@@ -350,6 +413,18 @@ class CellularPottsModel:
         for _ in tqdm(range(steps)):
             self.step(grid)
         return grid
+    
+    def run_time_development_sim(self, steps, interval=1000):
+        """
+        Run a simulation and store energy at given intervals."
+        """
+        grid = self.lattice.copy()
+        energy = []
+        for step in tqdm(range(steps)):
+            self.step(grid)
+            if step % interval == 0:
+                energy.append(self.total_H(grid))
+        return energy
     
     def run_animation(self, steps_per_frame=2000, frames=100):
         grid = self.lattice.copy()
