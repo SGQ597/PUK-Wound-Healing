@@ -1,11 +1,11 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.animation import FuncAnimation, PillowWriter, FFMpegWriter
+from matplotlib.animation import FuncAnimation, PillowWriter
 from tqdm import tqdm
-from scipy.signal import convolve2d
-import pickle
 import os
-import imageio.v2 as imageio
+
+from skimage.measure import perimeter as measure_perimeter
+
 WORKING_DIR = os.getcwd()
 
 class CellularPottsModel:
@@ -33,7 +33,7 @@ class CellularPottsModel:
         self.object_volumes = object_volumes  # None or a list of target volume for each cell
         
         if lattice_type is None:
-            self.lattice = np.random.randint(1, self.n_cells + 1, (self.L, self.L))
+            self.lattice = np.random.randint(1, self.n_cells + 1, size=(self.L, self.L))
         elif lattice_type == "hex":
             self.lattice = self.init_hexlattice()
         elif lattice_type == "circle":
@@ -137,29 +137,39 @@ class CellularPottsModel:
 
     def init_circlelattice(self):
         """
-        Function that will init a grid with circles
+        Deterministic placement of circles on a regular grid.
+        Overlap is allowed.
         """
-        max_tries = 10000
+        # number of grid points in each dimension
+        k = int(np.ceil(np.sqrt(self.n_cells)))
+
+        # spacing between circle centers
+        spacing = 1.5 * self.L / k
+
+        # compute deterministic centers
         centers = []
-        tries = 0 
-        while len(centers) < self.n_cells:
-            tries += 1
-            candidate = np.array([np.random.uniform(0, self.L),
-                                np.random.uniform(0, self.L)])
-            if centers:
-                dist2 = np.sum((np.array(centers) - candidate)**2, axis=1)
-                if np.any(dist2 < (self.L/100)**2):  # minimum distance squared
-                    continue  # reject overlap
-            centers.append(candidate)
-        
+        for iy in range(k):
+            for ix in range(k):
+                if len(centers) >= self.n_cells:
+                    break
+                cx = (ix + 0.5) * spacing
+                cy = (iy + 0.5) * spacing
+                centers.append((cx, cy))
+
+        # create grid
         grid = np.zeros((self.L, self.L), dtype=np.uint8)
-    
+
         yy, xx = np.indices((self.L, self.L))
-        radius = np.sqrt((self.L**2/(self.n_cells))/np.pi)
+
+        # same radius rule as you used
+        radius = np.sqrt((self.L**2/(self.n_cells))/np.pi)*1.9
+
         for i, (cx, cy) in enumerate(centers):
-            mask = (xx - cy)**2 + (yy - cx)**2 <= radius**2
-            grid[mask] = i + 1  # +1 as 0 is background
+            mask = (xx - cx)**2 + (yy - cy)**2 <= radius**2
+            grid[mask] = i + 1
+
         return grid
+
 
     def init_prerunlattice(self):
         """
@@ -268,29 +278,24 @@ class CellularPottsModel:
         """
         if self.C_p == 0:  # so it does not calculate unnecessarily
             return 0
-        else:
-            kernel_8 = np.array(
-                    [[1,1,1],
-                     [1,0,1],
-                     [1,1,1]], dtype=np.int32)
-            
+        else:            
             def compute_perimeter(grid, value):
                 """
                 Compute perimeter of all pixels with a given value,
-                using 8-connected neighbors and periodic boundaries.
+                Beaware that this doesn't account for periodic boundaries. OR count for the when the cell hits the border.
+                It counts one pixel as perimeter zero. 
                 """
-                mask = (grid == value).astype(np.int32)
+                # Binary mask for this cell type
+                mask = (grid == value)
                 if self.periodic:
                     # Pad with wrap (periodic)
                     mask_wrapped = np.pad(mask, pad_width=1, mode='wrap')
-                    neighbor_count = convolve2d(mask_wrapped, kernel_8, mode='valid')
                 else:
                     mask_wrapped = np.pad(mask, pad_width=1, mode='constant', constant_values=0)
-                    neighbor_count = convolve2d(mask_wrapped, kernel_8, mode='valid')
-                
-                # Each pixel contributes perimeter = #neighbors that are different
-                perimeter_grid = 8 - neighbor_count
-                return np.sum(perimeter_grid[mask == 1])
+
+                # Label connected components (in case cell_value appears multiple times)
+                perimeter = measure_perimeter(mask_wrapped, neighborhood=8)
+                return perimeter
             
             grid_copy = grid.copy()
             if new: # Assume we are changing the target point to the source point
