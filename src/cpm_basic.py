@@ -197,7 +197,7 @@ class CellularPottsModel:
         if self.object_volumes is None:
             for i in range(1, self.n_cells + 1): # for each cell identifier
                 V[i] = ((self.L * self.L) / (self.n_cells))
-        elif self.V is not None:
+        elif self.object_volumes is not None:
             for i, vol in enumerate(self.object_volumes):
                 V[i] = vol
         return V
