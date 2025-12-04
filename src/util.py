@@ -10,7 +10,7 @@ def color_code_cells(grid, type_cell):
     type_base_colors = {
         0: np.array([1, 1, 1]),         # white for background
         1: np.array([0.5, 0.7, 1]),     # blue-ish for type 1
-        2: np.array([1.0, 0.6, 0.6])      # red-ish for type 2
+        2: np.array([1.0, 0.6, 0.6])    # red-ish for type 2
     }
     unique_cells = np.unique(grid)
     # Build an array of base colors for each unique cell

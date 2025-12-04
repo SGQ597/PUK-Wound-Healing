@@ -14,8 +14,8 @@ class CellularPottsModel:
                  n_types: int=2, 
                  T: int=1, 
                  L:int=100,
-                 C_p: int=0,
-                 volume_coefficient=None, # 1D array of Cv for each type (length n_types+1)
+                 volume_coefficient=0, # 1D array of Cv for each type (length n_types+1)
+                 perimeter_coefficient=0, # 1D array of Cp for each type (length n_types+1)  
                  adhessions=None,  # 2D array of J values (shape (n_types+1, n_types+1))
                  lattice_type: str="hex",
                  object_volumes: list[float]=None,
@@ -24,9 +24,9 @@ class CellularPottsModel:
         self.L = L 
         self.n_cells = n_cells
         self.T = T
-        self.C_p = C_p
         self.n_types = n_types
         self.volume_coefficient = volume_coefficient
+        self.perimeter_coefficient = perimeter_coefficient
         self.adhessions = adhessions  # list of adhessions(should be a flatten [n_typesxn_types] matrix)
         self.periodic = periodic
         
@@ -40,12 +40,15 @@ class CellularPottsModel:
             self.lattice = self.init_circlelattice()
         elif lattice_type == "prerun":
             self.lattice = self.init_prerunlattice()
+        elif lattice_type == "two_cells":
+            self.lattice = self.init_two_cells_lattice()
         else:
-            raise ValueError("Either random, circle, prerun, or hex, or implement other shape init.")
+            raise ValueError("Either random, circle, prerun, two_cells, or hex, or implement other shape init.")
         
         self.tau = self.set_cell_type()  # is dict of cells (keys) and the cell types
         self.J = self.set_adhesion_coefficient_J() # is a 2D array of J values
         self.C_v = self.set_volume_coefficient_Cv()  # is a 1D array of Cv for each type
+        self.C_p = self.set_perimeter_coefficient_Cp()  # is a 1D array of Cp for each type
         self.V = self.set_object_volumes()  # is a dict of the cells (keys) and objective volumes
         self.P = self.set_object_perimeters()  # is a dict of the cells (keys) and objective perimeters
         self.volume_unit = 1
@@ -162,7 +165,7 @@ class CellularPottsModel:
         yy, xx = np.indices((self.L, self.L))
 
         # same radius rule as you used
-        radius = np.sqrt((self.L**2/(self.n_cells))/np.pi)*1.9
+        radius = np.sqrt((self.L**2/(self.n_cells))/np.pi)/1.8
 
         for i, (cx, cy) in enumerate(centers):
             mask = (xx - cx)**2 + (yy - cy)**2 <= radius**2
@@ -175,13 +178,23 @@ class CellularPottsModel:
         """
         Function that will init a grid with random values for prerun
         """
-        lattice = np.load(f"{WORKING_DIR}/saves/initial_grid.npy")
+        lattice = np.load(f"{WORKING_DIR}/saves/init_grids/initial_grid.npy")
         self.L = lattice.shape[0]
         list_of_cells = np.unique(lattice)
         if 0 in list_of_cells:
             self.n_cells = len(list_of_cells) - 1
         else:
             self.n_cells = len(list_of_cells)
+        return lattice
+    
+    def init_two_cells_lattice(self):
+        """
+        Function that will init a grid with two cells in the center
+        """
+        lattice = np.load(f"{WORKING_DIR}/saves/init_grids/initial_grid_two_cells.npy")
+        self.L = lattice.shape[0]
+        self.n_cells = 2
+        self.object_volumes = [0, 1257, 1257]  # set object volumes for the two cells
         return lattice
 
     def set_cell_type(self):
@@ -196,7 +209,8 @@ class CellularPottsModel:
         V[0] = 0  # background volume is 0
         if self.object_volumes is None:
             for i in range(1, self.n_cells + 1): # for each cell identifier
-                V[i] = ((self.L * self.L) / (self.n_cells))
+                #V[i] = ((self.L * self.L) / (self.n_cells))
+                V[i] = (np.sqrt(self.L**2/self.n_cells)/2)**2 * np.pi  # approximate volume from radius assuming circular shape
         elif self.object_volumes is not None:
             for i, vol in enumerate(self.object_volumes):
                 V[i] = vol
@@ -218,11 +232,25 @@ class CellularPottsModel:
         return J
     
     def set_volume_coefficient_Cv(self):
-        if self.volume_coefficient is None:
+
+        if not isinstance(self.volume_coefficient, (np.ndarray, list)):
+            C_v = np.zeros(self.n_types + 1)
+        elif self.volume_coefficient is None:
             C_v = np.ones(self.n_types + 1) * 5 # default value 
+            C_v[0] = 0  # background has no volume constraint
         else:
             C_v = self.volume_coefficient  # array of C_v for each type
         return C_v
+
+    def set_perimeter_coefficient_Cp(self):
+        if not isinstance(self.perimeter_coefficient, (np.ndarray, list)):
+            C_p = np.zeros(self.n_types + 1)
+        elif self.perimeter_coefficient is None:
+            C_p = np.ones(self.n_types + 1) * 5 # default value 
+            C_p[0] = 0  # background has no perimeter constraint
+        else:
+            C_p = self.perimeter_coefficient  # array of C_p for each type
+        return C_p
 
     #-------------------------------------------------------
     # HAMILTONIAN CALCULATION LOGIC
@@ -254,7 +282,7 @@ class CellularPottsModel:
         """
         Calculate the volume term.
         """
-        if not isinstance(self.volume_coefficient, (list, np.ndarray)) and self.volume_coefficient == 0:  # so it does not calculate unnecessarily
+        if np.all(self.C_v == 0):  # so it does not calculate unnecessarily
             return 0
         else:
             object_vol = self.V.get(point_value)
@@ -276,7 +304,7 @@ class CellularPottsModel:
         """
         Calculate the perimeter term.
         """
-        if self.C_p == 0:  # so it does not calculate unnecessarily
+        if np.all(self.C_p == 0):  # so it does not calculate unnecessarily
             return 0
         else:            
             def compute_perimeter(grid, value):
@@ -303,7 +331,7 @@ class CellularPottsModel:
 
             P = compute_perimeter(grid_copy, point_value)
        
-            H_perim = (P - self.P.get(point_value))**2
+            H_perim = self.C_p[self.tau.get(point_value)] * (P - self.P.get(point_value))**2
             return H_perim
 
     def calculate_H(self,
@@ -320,8 +348,7 @@ class CellularPottsModel:
                     self.volume_term(point_value=target_point, grid=grid, new=new, source=False) + 
                     self.volume_term(point_value=source_point, grid=grid, new=new, source=True)
                     ) +
-                self.C_p *
-                (
+                    (
                     self.perimeter_term(point_value=source_point,
                                         source_point_value=source_point,
                                         target_point_index=target_point_index,
@@ -332,7 +359,7 @@ class CellularPottsModel:
                                         target_point_index=target_point_index,
                                         grid=grid,
                                         new=new)
-                )
+                    )
                 )
         else:
             H = (
@@ -341,7 +368,6 @@ class CellularPottsModel:
                     self.volume_term(point_value=target_point, grid=grid, new=new, source=False) + 
                     self.volume_term(point_value=source_point, grid=grid, new=new, source=True)
                     ) +
-                self.C_p *
                     (
                     self.perimeter_term(point_value=source_point,
                                         source_point_value=source_point,
@@ -369,14 +395,12 @@ class CellularPottsModel:
         
         # Volume term
         for cell_id in range(1, self.n_cells + 1):
-            total_H += self.volume_term(point_value=cell_id, grid=grid, new=False)
-            if self.C_p != 0:
-                P = self.perimeter_term(point_value=cell_id,
+            total_H += (self.volume_term(point_value=cell_id, grid=grid, new=False) +
+                        self.perimeter_term(point_value=cell_id,
                                         source_point_value=None,
                                         target_point_index=None,
                                         grid=grid,
-                                        new=False)
-                total_H += self.C_p * (P - self.P.get(cell_id))**2
+                                        new=False))
         return total_H
 
     #---------------------------------------------------------
@@ -469,5 +493,5 @@ class CellularPottsModel:
 
         # Save as GIF
         writer = PillowWriter(fps=10)  # adjust fps as needed
-        anim.save(f"{WORKING_DIR}/saves/{output_file}.gif", writer=writer)
+        anim.save(f"{WORKING_DIR}/figures/{output_file}.gif", writer=writer)
         plt.close(fig)
