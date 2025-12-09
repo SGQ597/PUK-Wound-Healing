@@ -437,7 +437,7 @@ class CellularPottsModel:
                 grid[target_point_index] = source_point
 
 
-    def run_a_sim(self, steps):
+    def run_a_sim(self, steps:int):
         grid = self.lattice.copy()
         for _ in tqdm(range(steps)):
             self.step(grid)
