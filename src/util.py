@@ -1,4 +1,5 @@
 import numpy as np
+from skimage.morphology import convex_hull_image
 
 
 def color_code_cells(grid, type_cell):
@@ -31,3 +32,45 @@ def color_code_cells(grid, type_cell):
     # Build final color grid (vectorized gather)
     color_grid = all_colors[index_grid]
     return color_grid
+
+def calculate_convexity_ratio(grid_array, target_value:int):
+    """
+    Calculates the Area-Based Convexity Ratio for a cell in a 2D grid.
+    Convexity Ratio = Area(Shape) / Area(Convex Hull)
+    """
+    # 1. Define the shape mask (S)
+    shape_mask = (grid_array == target_value)
+    area_s = np.sum(shape_mask)  # area of the shape
+    # 2. Calculate the Convex Hull Image (CH(S))
+    convex_hull = convex_hull_image(shape_mask)  # fills any concavities in the shape_mask
+    area_ch = np.sum(convex_hull) # area of the convex hull
+
+    # 3. Calculate the Convexity Ratio
+    ratio = area_s / area_ch
+    return ratio
+
+def non_boundary_convexity(grid, cell_types: dict):
+    cell_type_convexity = np.zeros(len(np.unique(list(cell_types.values()))))
+    cell_types_count = np.zeros(len(np.unique(list(cell_types.values()))))
+    labels = np.unique(grid)
+    labels = labels[labels != 0]  # exclude background
+
+    rows, cols = grid.shape
+    
+    for v in labels:
+        # Create mask for this label
+        mask = (grid == v)
+        coords = np.where(mask)
+        if (np.any(coords[0] == 0) or np.any(coords[0] == rows - 1) or 
+            np.any(coords[1] == 0) or np.any(coords[1] == cols - 1)):
+            continue  # Skip cells touching the boundary
+        else:
+            ratio = calculate_convexity_ratio(grid, target_value=v)
+            cell_type = cell_types.get(v)
+            if cell_type is not None:
+                cell_type_convexity[cell_type] += ratio
+                cell_types_count[cell_type] += 1
+    cell_type_convexity = np.divide(cell_type_convexity, cell_types_count, 
+                                    out=np.zeros_like(cell_type_convexity), 
+                                    where=cell_types_count != 0)  # avoid division by zero
+    return cell_type_convexity
