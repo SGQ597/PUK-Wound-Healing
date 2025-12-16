@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 from tqdm import tqdm
 import os
-
+from src.util import neighbors_type_dict
 from skimage.measure import perimeter as measure_perimeter
 
 WORKING_DIR = os.getcwd()
@@ -14,6 +14,7 @@ class CellularPottsModel:
                  n_types: int=2, 
                  T: int=1, 
                  L:int=100,
+                 type_percentages: list[float]=None,
                  volume_coefficient=0, # 1D array of Cv for each type (length n_types+1)
                  perimeter_coefficient=0, # 1D array of Cp for each type (length n_types+1)  
                  adhessions=None,  # 2D array of J values (shape (n_types+1, n_types+1))
@@ -25,6 +26,7 @@ class CellularPottsModel:
         self.n_cells = n_cells
         self.T = T
         self.n_types = n_types
+        self.type_percentages = type_percentages
         self.volume_coefficient = volume_coefficient
         self.perimeter_coefficient = perimeter_coefficient
         self.adhessions = adhessions  # list of adhessions(should be a flatten [n_typesxn_types] matrix)
@@ -32,10 +34,13 @@ class CellularPottsModel:
         
         self.object_volumes = object_volumes  # None or a list of target volume for each cell
         
+        self.tau = self.set_cell_type()  # is dict of cells (keys) and the cell types
         if lattice_type is None:
             self.lattice = np.random.randint(1, self.n_cells + 1, size=(self.L, self.L))
         elif lattice_type == "hex":
             self.lattice = self.init_hexlattice()
+        elif lattice_type == "surrounded_cell":
+            self.lattice = self.init_hex_surroundedcell_lattice()
         elif lattice_type == "circle":
             self.lattice = self.init_circlelattice()
         elif lattice_type == "prerun":
@@ -43,9 +48,8 @@ class CellularPottsModel:
         elif lattice_type == "two_cells":
             self.lattice = self.init_two_cells_lattice()
         else:
-            raise ValueError("Either random, circle, prerun, two_cells, or hex, or implement other shape init.")
-        
-        self.tau = self.set_cell_type()  # is dict of cells (keys) and the cell types
+            raise ValueError("Either random, circle, prerun, two_cells, surrounded_cell or hex, or implement other shape init.")
+
         self.J = self.set_adhesion_coefficient_J() # is a 2D array of J values
         self.C_v = self.set_volume_coefficient_Cv()  # is a 1D array of Cv for each type
         self.C_p = self.set_perimeter_coefficient_Cp()  # is a 1D array of Cp for each type
@@ -187,6 +191,51 @@ class CellularPottsModel:
             self.n_cells = len(list_of_cells)
         return lattice
     
+    def init_hex_surroundedcell_lattice(self):
+        """
+        Function that will init a grid with hexagons, and cells surrounded by other cells
+        """
+        if self.n_types != 2:
+            raise ValueError("n_types must be 2 for this lattice type to work.")
+        if self.type_percentages is None: 
+            raise ValueError("Cell Type Percentage must be defined for this lattice type to work.")
+        elif isinstance(self.type_percentages, (list, np.ndarray)):
+            if len(self.type_percentages) != self.n_types:
+                raise ValueError("Length of type_percentages must equal n_types.")
+            if not np.isclose(np.sum(self.type_percentages), 1.0):
+                raise ValueError("type_percentages must sum to 1.")
+            if len(np.unique(self.type_percentages)) != 2:
+                raise ValueError("type_percentages must have two unique values for this lattice type to work.")
+
+        grid = self.init_hexlattice()
+        majority_type = np.argmax(self.type_percentages) + 1  # +1 because types start at 1
+        tau = {i: majority_type for i in range(1, self.n_cells + 1)}  # all cells set to majority type
+        
+        border_cells = np.unique(np.concatenate([grid[0, :], grid[-1, :], grid[:, 0], grid[:, -1]]))
+        valid_cells = np.setdiff1d(np.arange(1, self.n_cells + 1), border_cells)  # exclude border cells
+
+        minority_cell_number = int(self.n_cells * np.min(self.type_percentages))
+        failed_attempts = 0
+        for _ in range(minority_cell_number):
+            cell_to_change = np.random.choice(valid_cells)
+            neighbor_dict = neighbors_type_dict(grid, tau)
+            if all(neighbor_dict[cell_to_change] == majority_type):
+                tau[cell_to_change] = 3 - majority_type  # switch between 1 and 2
+                valid_cells = valid_cells[valid_cells != cell_to_change]  # remove from valid cells
+            else:
+                failed_attempts += 1
+
+        if failed_attempts > 0:  # try again for failed attempts, does not guarantee success but better than nothing
+            for _ in range(failed_attempts):
+                cell_to_change = np.random.choice(valid_cells)
+                neighbor_dict = neighbors_type_dict(grid, tau)
+                if all(neighbor_dict[cell_to_change] == majority_type):
+                    tau[cell_to_change] = 3 - majority_type  # switch between 1 and 2
+                    valid_cells = valid_cells[valid_cells != cell_to_change]  # remove from valid cells
+        self.tau = tau  # update the cell type dictionary
+        return grid
+
+
     def init_two_cells_lattice(self):
         """
         Function that will init a grid with two cells in the center
@@ -200,8 +249,24 @@ class CellularPottsModel:
     def set_cell_type(self):
         tau = {}  # cell type dict
         tau[0] = 0  # background type is 0
-        for i in range(1, self.n_cells + 1):
-            tau[i] = np.random.randint(1, self.n_types+1)  # randomly assign type 1 or 2
+        if self.type_percentages is None:
+            for i in range(1, self.n_cells + 1):
+                tau[i] = np.random.randint(1, self.n_types + 1)  # randomly assign type 1 or 2
+
+        elif len(self.type_percentages) != self.n_types:
+            raise ValueError("Length of type_percentages must equal n_types.")
+        
+        else: # if type percentages are given
+            cell_types = []
+            for t, p in zip(range(1, self.n_types + 1), self.type_percentages):
+                cell_types.extend([t] * int(p * self.n_cells))
+            if len(cell_types) < self.n_cells:  # fill in any remaining cells with the last type
+                cell_types.extend([self.n_types] * (self.n_cells - len(cell_types)))
+
+            np.random.shuffle(cell_types)
+            for i, t in enumerate(cell_types, start=1):
+                tau[i] = t
+            
         return tau
         
     def set_object_volumes(self):
@@ -215,8 +280,7 @@ class CellularPottsModel:
             for i, vol in enumerate(self.object_volumes):
                 V[i] = vol
         return V
-    
-        
+           
     def set_object_perimeters(self):
         P = {}  # perimeter dict
         P[0] = 0  # background perimeter is 0
@@ -310,7 +374,6 @@ class CellularPottsModel:
             def compute_perimeter(grid, value):
                 """
                 Compute perimeter of all pixels with a given value,
-                Beaware that this doesn't account for periodic boundaries. OR count for the when the cell hits the border.
                 It counts one pixel as perimeter zero. 
                 """
                 # Binary mask for this cell type

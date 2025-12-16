@@ -1,6 +1,10 @@
 import numpy as np
 from skimage.morphology import convex_hull_image
+from collections import defaultdict
 
+#--------------------------------------------------
+# Visualization Functions
+#--------------------------------------------------
 
 def color_code_cells(grid, type_cell):
     """
@@ -32,6 +36,10 @@ def color_code_cells(grid, type_cell):
     # Build final color grid (vectorized gather)
     color_grid = all_colors[index_grid]
     return color_grid
+
+#--------------------------------------------------
+# Cell Shape Analysis Functions
+#--------------------------------------------------
 
 def calculate_convexity_ratio(grid_array, target_value:int):
     """
@@ -74,3 +82,28 @@ def non_boundary_convexity(grid, cell_types: dict):
                                     out=np.zeros_like(cell_type_convexity), 
                                     where=cell_types_count != 0)  # avoid division by zero
     return cell_type_convexity
+
+
+#--------------------------------------------------
+# Cell Neighbor Functions
+#--------------------------------------------------
+
+def neighbors_type_dict(A, A_types):
+    neighbors = defaultdict(set)
+    def add_neighbors(X, Y):
+        mask = X != Y
+        for a, b in zip(X[mask], Y[mask]):
+            neighbors[a].add(b)
+            neighbors[b].add(a)
+    # vertical
+    add_neighbors(A[:-1, :], A[1:, :])
+    # horizontal
+    add_neighbors(A[:, :-1], A[:, 1:])
+    # diagonal upper left to lower right
+    add_neighbors(A[:-1, :-1], A[1:, 1:])
+    # diagonal lower left to upper right
+    add_neighbors(A[:-1, 1:], A[1:, :-1])
+
+
+    neighbors_type = {cell: [A_types[n] for n in nbs] for cell, nbs in neighbors.items()}
+    return neighbors_type
