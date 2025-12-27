@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 from tqdm import tqdm
 import os
-from src.util import neighbors_type_dict
+from src.util import neighbors_type_dict, isolated_punisher
 from skimage.measure import perimeter as measure_perimeter
 
 WORKING_DIR = os.getcwd()
@@ -31,6 +31,7 @@ class CellularPottsModel:
         self.perimeter_coefficient = perimeter_coefficient
         self.adhessions = adhessions  # list of adhessions(should be a flatten [n_typesxn_types] matrix)
         self.periodic = periodic
+        self.lattice_type = lattice_type
         
         self.object_volumes = object_volumes  # None or a list of target volume for each cell
         
@@ -39,8 +40,12 @@ class CellularPottsModel:
             self.lattice = np.random.randint(1, self.n_cells + 1, size=(self.L, self.L))
         elif lattice_type == "hex":
             self.lattice = self.init_hexlattice()
+        elif lattice_type == "honeycomb":
+            self.lattice = self.init_honeycomb_lattice()
         elif lattice_type == "surrounded_cell":
-            self.lattice = self.init_hex_surroundedcell_lattice()
+            self.lattice = self.init_surroundedcell_lattice()
+        elif lattice_type == "honeycomb_surrounded_cell":
+            self.lattice = self.init_surroundedcell_lattice()
         elif lattice_type == "circle":
             self.lattice = self.init_circlelattice()
         elif lattice_type == "prerun":
@@ -48,7 +53,8 @@ class CellularPottsModel:
         elif lattice_type == "two_cells":
             self.lattice = self.init_two_cells_lattice()
         else:
-            raise ValueError("Either random, circle, prerun, two_cells, surrounded_cell or hex, or implement other shape init.")
+            raise ValueError(f"Either random, hex, honeycomb, surrounded_cell, honeycomb_surrounded_cell, circle, prerun, two_cells, "
+                             f"or implement other shape init.")
 
         self.J = self.set_adhesion_coefficient_J() # is a 2D array of J values
         self.C_v = self.set_volume_coefficient_Cv()  # is a 1D array of Cv for each type
@@ -141,6 +147,62 @@ class CellularPottsModel:
 
         lattice = np.argmin(d2, axis=2).astype(np.int32) + 1
         return lattice
+    
+    def init_honeycomb_lattice(self):
+        # 1. Create the coordinate grid
+        x = np.arange(self.L)
+        y = np.arange(self.L)
+        X, Y = np.meshgrid(x, y)
+
+        # 2. Define spacing
+        area_per_cell = (self.L ** 2) / self.n_cells
+        hex_size = np.sqrt(area_per_cell / (1.5 * np.sqrt(3)))
+        dx = hex_size * np.sqrt(3)
+        dy = hex_size * 1.5
+
+        # 3. Generate centers (with a buffer to ensure full coverage)
+        cols = int(self.L / dx) + 2
+        rows = int(self.L / dy) + 2
+        
+        centers = []
+        for r in range(rows):
+            offset = (dx / 2) if (r % 2 == 1) else 0
+            for c in range(cols):
+                centers.append([c * dx + offset, r * dy])
+        
+        centers = np.array(centers)
+
+        # 4. Initial Voronoi assignment
+        pixel_coords = np.stack([X, Y], axis=-1)
+        dist_sq = np.sum((pixel_coords[:, :, np.newaxis, :] - centers)**2, axis=-1)
+        grid_values = np.argmin(dist_sq, axis=-1) + 1 # Indices 1 to N
+
+        # 5. Trim excess cells by setting them to 0
+        unique_ids = np.unique(grid_values)
+        num_found = len(unique_ids)
+
+        if num_found > self.n_cells:
+            # Calculate how far each cell center is from the image center
+            img_center = np.array([self.L / 2, self.L / 2])
+            # We only care about the centers that actually appeared in grid_values
+            active_centers = centers[unique_ids - 1] 
+            dist_to_mid = np.sum((active_centers - img_center)**2, axis=-1)
+            
+            # Find the IDs of the furthest cells (the ones at the edges)
+            # We sort by distance and take the last (num_found - n_cells) IDs
+            excess_count = num_found - self.n_cells
+            furthest_indices = np.argsort(dist_to_mid)[-excess_count:]
+            ids_to_remove = unique_ids[furthest_indices]
+
+            # Set those specific cell IDs to 0
+            mask = np.isin(grid_values, ids_to_remove)
+            grid_values[mask] = 0
+        # reassign cell IDs to be consecutive
+        unique_ids = np.unique(grid_values)
+        id_mapping = {old_id: new_id for new_id, old_id in enumerate(unique_ids)}
+        for old_id, new_id in id_mapping.items():
+            grid_values[grid_values == old_id] = new_id
+        return grid_values
 
     def init_circlelattice(self):
         """
@@ -177,7 +239,6 @@ class CellularPottsModel:
 
         return grid
 
-
     def init_prerunlattice(self):
         """
         Function that will init a grid with random values for prerun
@@ -191,7 +252,7 @@ class CellularPottsModel:
             self.n_cells = len(list_of_cells)
         return lattice
     
-    def init_hex_surroundedcell_lattice(self):
+    def init_surroundedcell_lattice(self):
         """
         Function that will init a grid with hexagons, and cells surrounded by other cells
         """
@@ -206,10 +267,13 @@ class CellularPottsModel:
                 raise ValueError("type_percentages must sum to 1.")
             if len(np.unique(self.type_percentages)) != 2:
                 raise ValueError("type_percentages must have two unique values for this lattice type to work.")
-
-        grid = self.init_hexlattice()
+        if self.lattice_type == "surrounded_cell":
+            grid = self.init_hexlattice()
+        elif self.lattice_type == "honeycomb_surrounded_cell":
+            grid = self.init_honeycomb_lattice()
         majority_type = np.argmax(self.type_percentages) + 1  # +1 because types start at 1
         tau = {i: majority_type for i in range(1, self.n_cells + 1)}  # all cells set to majority type
+        tau[0] = 0
         
         border_cells = np.unique(np.concatenate([grid[0, :], grid[-1, :], grid[:, 0], grid[:, -1]]))
         valid_cells = np.setdiff1d(np.arange(1, self.n_cells + 1), border_cells)  # exclude border cells
@@ -232,6 +296,7 @@ class CellularPottsModel:
                 if all(neighbor_dict[cell_to_change] == majority_type):
                     tau[cell_to_change] = 3 - majority_type  # switch between 1 and 2
                     valid_cells = valid_cells[valid_cells != cell_to_change]  # remove from valid cells
+        tau[0] = 0  # background type is 0
         self.tau = tau  # update the cell type dictionary
         return grid
 
@@ -386,7 +451,7 @@ class CellularPottsModel:
 
                 # Label connected components (in case cell_value appears multiple times)
                 perimeter = measure_perimeter(mask_wrapped, neighborhood=8)
-                return perimeter
+                return perimeter # Returns perimeter value and if there are isolated pixels
             
             grid_copy = grid.copy()
             if new: # Assume we are changing the target point to the source point
@@ -404,46 +469,33 @@ class CellularPottsModel:
         """
         Calculate the the Hamiltonian (total energy).
         """
-        if new: # Assume we are changing the target point to the source point  
-            H = (
-                self.adhesion_term(point_index=target_point_index, point_value=source_point, grid=grid) + 
-                    (
-                    self.volume_term(point_value=target_point, grid=grid, new=new, source=False) + 
-                    self.volume_term(point_value=source_point, grid=grid, new=new, source=True)
-                    ) +
-                    (
-                    self.perimeter_term(point_value=source_point,
-                                        source_point_value=source_point,
-                                        target_point_index=target_point_index,
-                                        grid=grid,
-                                        new=new) +
-                    self.perimeter_term(point_value=target_point,
-                                        source_point_value=target_point,
-                                        target_point_index=target_point_index,
-                                        grid=grid,
-                                        new=new)
-                    )
-                )
-        else:
-            H = (
-                self.adhesion_term(point_index=target_point_index, point_value=target_point, grid=grid) + 
-                    (
-                    self.volume_term(point_value=target_point, grid=grid, new=new, source=False) + 
-                    self.volume_term(point_value=source_point, grid=grid, new=new, source=True)
-                    ) +
-                    (
-                    self.perimeter_term(point_value=source_point,
-                                        source_point_value=source_point,
-                                        target_point_index=target_point_index,
-                                        grid=grid,
-                                        new=new) +
-                    self.perimeter_term(point_value=target_point,
-                                        source_point_value=target_point,
-                                        target_point_index=target_point_index,
-                                        grid=grid,
-                                        new=new)
-                    )
-                )
+        H = 0
+        if new: # how things would be after changing
+            H += self.adhesion_term(point_index=target_point_index, point_value=source_point, grid=grid)
+            grid_temp = grid.copy()
+            grid_temp[target_point_index] = source_point
+            isolated = isolated_punisher(grid_temp, value=source_point, periodic=self.periodic)
+        else:  # before changing target to source
+            H += self.adhesion_term(point_index=target_point_index, point_value=target_point, grid=grid)
+            isolated = isolated_punisher(grid, value=target_point, periodic=self.periodic)
+
+        H += (
+            (self.volume_term(point_value=target_point, grid=grid, new=new, source=False) + 
+             self.volume_term(point_value=source_point, grid=grid, new=new, source=True)) 
+             +
+            (self.perimeter_term(point_value=source_point,
+                                 source_point_value=source_point,
+                                 target_point_index=target_point_index,
+                                 grid=grid,
+                                 new=new) +
+            self.perimeter_term(point_value=target_point,
+                                source_point_value=target_point,
+                                target_point_index=target_point_index,
+                                grid=grid,
+                                new=new))
+            )
+        if isolated:
+            H *= 1.8  # penalty for isolated punisher cells
         return H
 
     def total_H(self, grid):

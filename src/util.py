@@ -81,7 +81,35 @@ def non_boundary_convexity(grid, cell_types: dict):
     cell_type_convexity = np.divide(cell_type_convexity, cell_types_count, 
                                     out=np.zeros_like(cell_type_convexity), 
                                     where=cell_types_count != 0)  # avoid division by zero
-    return cell_type_convexity
+    return cell_type_convexity  # average convexity per cell type
+
+
+def non_boundary_convexity_two_types(grid, cell_types: dict):
+    cell_type_1_convexity  = []
+    cell_type_2_convexity  = []
+    cell_types_count = np.zeros(len(np.unique(list(cell_types.values()))))
+    labels = np.unique(grid)
+    labels = labels[labels != 0]  # exclude background
+
+    rows, cols = grid.shape
+    
+    for v in labels:
+        # Create mask for this label
+        mask = (grid == v)
+        coords = np.where(mask)
+        if (np.any(coords[0] == 0) or np.any(coords[0] == rows - 1) or 
+            np.any(coords[1] == 0) or np.any(coords[1] == cols - 1)):
+            continue  # Skip cells touching the boundary
+        else:
+            ratio = calculate_convexity_ratio(grid, target_value=v)
+            cell_type = cell_types.get(v)
+            if cell_type is not None:
+                if cell_type == 1:
+                    cell_type_1_convexity.append(ratio)
+                elif cell_type == 2:
+                    cell_type_2_convexity.append(ratio)
+                cell_types_count[cell_type] += 1
+    return cell_type_1_convexity, cell_type_2_convexity, cell_types_count  # lists of convexity per cell type
 
 
 #--------------------------------------------------
@@ -89,6 +117,10 @@ def non_boundary_convexity(grid, cell_types: dict):
 #--------------------------------------------------
 
 def neighbors_type_dict(A, A_types):
+    """
+    A function that returns a dictionary 
+    where each cell id maps to a list of cell types of its neighboring cells.
+    """
     neighbors = defaultdict(set)
     def add_neighbors(X, Y):
         mask = X != Y
@@ -107,3 +139,29 @@ def neighbors_type_dict(A, A_types):
 
     neighbors_type = {cell: [A_types[n] for n in nbs] for cell, nbs in neighbors.items()}
     return neighbors_type
+
+#--------------------------------------------------
+# Isolated Punisher Detection
+#--------------------------------------------------
+
+def isolated_punisher(grid, value, periodic):
+    # Binary mask for this cell type
+    mask = (grid == value)
+    if periodic:
+        # Pad with wrap (periodic)
+        mask_wrapped = np.pad(mask, pad_width=1, mode='wrap')
+    else:
+        mask_wrapped = np.pad(mask, pad_width=1, mode='constant', constant_values=0)
+
+    isolated = (
+                mask_wrapped[1:-1, 1:-1] &          # cell itself
+                ~mask_wrapped[:-2, 1:-1] &          # up
+                ~mask_wrapped[2:, 1:-1] &           # down
+                ~mask_wrapped[1:-1, :-2] &          # left
+                ~mask_wrapped[1:-1, 2:]  &           # right
+                ~mask_wrapped[ :-2, :-2] &        # up-left
+                ~mask_wrapped[ :-2, 2:] &         # up-right
+                ~mask_wrapped[ 2:, :-2] &         # down-left
+                ~mask_wrapped[ 2:, 2:]             # down-right
+            )  # moore neighborhood
+    return np.any(isolated)  # Returns True if there are isolated pixels
