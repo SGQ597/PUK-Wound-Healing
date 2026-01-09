@@ -145,6 +145,11 @@ def neighbors_type_dict(A, A_types):
 #--------------------------------------------------
 
 def isolated_punisher(grid, value, periodic):
+    """
+    Function that will give True,
+    if the value/cell identity has any isolated pixels/site.
+    An isolated site is defined as a site of the given type that has no neighboring sites of the same identity.
+    """
     # Binary mask for this cell type
     mask = (grid == value)
     if periodic:
